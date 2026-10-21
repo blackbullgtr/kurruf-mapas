@@ -1,0 +1,57 @@
+# Genera los mapas sin conexión de Kurruf Ride y los publica en GitHub Pages.
+# Corre solo el día 3 de cada mes, y también a mano desde la pestaña "Actions" -> "Run workflow".
+name: Mapas Kurruf
+
+on:
+  schedule:
+    - cron: "17 8 3 * *"        # día 3 de cada mes, 08:17 UTC (~05:17 en Chile)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar pyosmium
+        run: pip install osmium==4.0.2
+
+      - name: Descargar Chile desde Geofabrik
+        run: curl -fSL --retry 3 -o chile.osm.pbf https://download.geofabrik.de/south-america/chile-latest.osm.pbf
+
+      - name: Convertir a mapas por región
+        run: python build_maps.py chile.osm.pbf site
+
+      - name: Revisar los archivos generados
+        run: for f in site/v1/*.krm; do python verify_krm.py "$f"; done
+
+      - name: Página de inicio
+        run: cp index.html site/
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
