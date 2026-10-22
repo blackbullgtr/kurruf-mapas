@@ -24,10 +24,23 @@ https://TU-USUARIO.github.io/kurruf-mapas/v1/nuble.krm
 4. **Activar Pages**: *Settings → Pages → Build and deployment → Source:* **GitHub Actions**.
 5. **Primera generación**: pestaña *Actions* → **Mapas Kurruf** → **Run workflow**.
    Tarda unos minutos. Cuando quede en verde, abre `https://TU-USUARIO.github.io/kurruf-mapas/v1/regions.json`.
-6. **En la app**: *Mapas sin conexión* → escribe la dirección `https://TU-USUARIO.github.io/kurruf-mapas/`
-   y descarga tu región.
+6. **En la app** no hay que hacer nada: la dirección viene incluida y la app baja sola la región
+   donde estás (y la vecina al acercarte al borde navegando).
 
-Desde ahí se actualiza solo el día 3 de cada mes. La app avisa cuando hay una versión nueva.
+Desde ahí se actualiza solo el día 3 de cada mes, y la app baja las versiones nuevas sola.
+
+## Publicar un firmware nuevo (OTA)
+
+1. En el proyecto ESP-IDF sube la versión en `sdkconfig` (`CONFIG_APP_PROJECT_VER="1.0.4"`) y compila.
+2. En GitHub: entra a la carpeta **firmware** del repositorio → *Add file → Upload files* → arrastra
+   `build/RIDE.bin` (reemplaza el anterior, siempre con el nombre `RIDE.bin`) → *Commit changes*.
+3. Se publica solo en 1-2 minutos (pestaña *Actions*). Si el archivo no es un firmware de Kurruf
+   Ride (por ejemplo el bootloader), el proceso falla en rojo y no se publica nada.
+4. La app avisa "Firmware 1.0.4 disponible" y con un toque lo instala por WiFi.
+
+La primera vez la carpeta `firmware` no existe: *Add file → Create new file*, escribe como nombre
+`firmware/LEEME.txt` (con la barra, GitHub crea la carpeta), cualquier texto, *Commit*. Después
+entra a la carpeta y sube `RIDE.bin` ahí.
 
 ## Correrlo en tu PC (opcional)
 
