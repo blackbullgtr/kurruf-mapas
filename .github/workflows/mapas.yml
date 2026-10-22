@@ -1,0 +1,67 @@
+# Publica en GitHub Pages los mapas sin conexión y el firmware del Kurruf Ride.
+#  - Día 3 de cada mes (y a mano con "Run workflow"): genera los mapas desde cero.
+#  - Al subir un firmware nuevo a firmware/RIDE.bin: reutiliza los mapas ya publicados
+#    (tarda 1-2 minutos) y publica el firmware.
+name: Mapas y firmware Kurruf
+
+on:
+  schedule:
+    - cron: "17 8 3 * *"        # día 3 de cada mes, 08:17 UTC (~05:17 en Chile)
+  workflow_dispatch:
+  push:
+    paths:
+      - "firmware/**"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Mapas (reutilizar los publicados o generarlos)
+        env:
+          SITE_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
+        run: |
+          if [ "${{ github.event_name }}" = "push" ] && python fetch_published.py "$SITE_URL" site; then
+            echo "Solo cambió el firmware: mapas reutilizados"
+          else
+            rm -rf site/v1
+            pip install osmium==4.0.2
+            curl -fSL --retry 3 -o chile.osm.pbf https://download.geofabrik.de/south-america/chile-latest.osm.pbf
+            python build_maps.py chile.osm.pbf site
+            for f in site/v1/*.krm; do python verify_krm.py "$f"; done
+          fi
+
+      - name: Firmware
+        run: python publish_fw.py firmware site
+
+      - name: Página de inicio
+        run: cp index.html site/
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
