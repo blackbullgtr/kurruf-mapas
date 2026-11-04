@@ -39,11 +39,11 @@ jobs:
           if [ "${{ github.event_name }}" = "push" ] && python fetch_published.py "$SITE_URL" site; then
             echo "Solo cambió el firmware: mapas reutilizados"
           else
-            rm -rf site/v1
+            rm -rf site/v1 site/v2
             pip install osmium==4.0.2
             curl -fSL --retry 3 -o chile.osm.pbf https://download.geofabrik.de/south-america/chile-latest.osm.pbf
             python build_maps.py chile.osm.pbf site
-            for f in site/v1/*.krm; do python verify_krm.py "$f"; done
+            for f in site/v1/*.krm site/v2/*.krm; do python verify_krm.py "$f"; done
           fi
 
       - name: Firmware
