@@ -10,8 +10,9 @@ Uso:
     python build_maps.py chile-latest.osm.pbf salida/
 
 Genera:
-    salida/v1/regions.json      índice: regiones, tamaño, fecha, sha256
-    salida/v1/<region>.krm      un archivo por región
+    salida/v2/regions.json      índice: regiones, tamaño, fecha, sha256   (app 1.1 en adelante)
+    salida/v2/<region>.krm      un archivo por región, con puentes/túneles/rotondas marcados
+    salida/v1/...               lo mismo sin marcas (para apps anteriores; se puede quitar después)
 
 Formato .krm (little endian):
     "KRM1" | u16 versión | u16 reservado
@@ -22,6 +23,8 @@ Formato .krm (little endian):
              primer punto = zigzag(lat - lat_celda), zigzag(lon - lon_celda) en microgrados,
              siguientes = zigzag de la diferencia con el anterior.
     Tipos: 0 autopista/troncal/primaria, 1 secundaria/terciaria, 2 residencial, 3 servicio/huella.
+    Versión 2: el byte de tipo lleva además marcas en los bits altos:
+        0x80 puente, 0x40 túnel, 0x20 rotonda (los 2 bits bajos siguen siendo el tipo).
 """
 import hashlib
 import json
@@ -33,7 +36,7 @@ import time
 
 import osmium
 
-VERSION = 1
+FLAG_BRIDGE, FLAG_TUNNEL, FLAG_ROUNDABOUT = 0x80, 0x40, 0x20
 CELL_E6 = 50_000          # 0,05° (~5,5 km norte-sur)
 PAD = 0.05                # margen alrededor de cada región (las calles del borde quedan en ambas)
 
@@ -117,7 +120,7 @@ class Region:
         self.lon0 = int(math.floor(self.bbox[1] * 1e6 / CELL_E6)) * CELL_E6
         self.nx = int(math.ceil((self.bbox[3] * 1e6 - self.lon0) / CELL_E6))
         self.ny = int(math.ceil((self.bbox[2] * 1e6 - self.lat0) / CELL_E6))
-        self.cells = {}        # (ix, iy) -> [cantidad, bytearray]
+        self.cells = {}        # (ix, iy) -> [cantidad, bytearray v1, bytearray v2]
         self.ways = 0
         self.points = 0
 
@@ -128,28 +131,31 @@ class Region:
     def cell_of(self, lat_e6, lon_e6):
         return ((lon_e6 - self.lon0) // CELL_E6, (lat_e6 - self.lat0) // CELL_E6)
 
-    def add_piece(self, cell, cls, pts):
+    def add_piece(self, cell, cls, flags, pts):
         ix, iy = cell
         if not (0 <= ix < self.nx and 0 <= iy < self.ny) or len(pts) < 2:
             return
         entry = self.cells.get(cell)
         if entry is None:
-            entry = self.cells[cell] = [0, bytearray()]
-        buf = entry[1]
+            entry = self.cells[cell] = [0, bytearray(), bytearray()]
         clat = self.lat0 + iy * CELL_E6
         clon = self.lon0 + ix * CELL_E6
-        buf.append(cls)
-        varint(len(pts), buf)
+        body = bytearray()
+        varint(len(pts), body)
         plat, plon = clat, clon
         for la, lo in pts:
-            varint(zigzag(la - plat), buf)
-            varint(zigzag(lo - plon), buf)
+            varint(zigzag(la - plat), body)
+            varint(zigzag(lo - plon), body)
             plat, plon = la, lo
+        entry[1].append(cls)
+        entry[1] += body
+        entry[2].append(cls | flags)
+        entry[2] += body
         entry[0] += 1
         self.ways += 1
         self.points += len(pts)
 
-    def add_way(self, cls, lat_e6, lon_e6):
+    def add_way(self, cls, flags, lat_e6, lon_e6):
         """Corta la calle en pedazos por celda (cada pedazo arranca en el punto anterior para no dejar huecos)."""
         cur = self.cell_of(lat_e6[0], lon_e6[0])
         piece = [(lat_e6[0], lon_e6[0])]
@@ -158,14 +164,14 @@ class Region:
             c = self.cell_of(*p)
             piece.append(p)
             if c != cur:
-                self.add_piece(cur, cls, piece)
+                self.add_piece(cur, cls, flags, piece)
                 piece = [(lat_e6[i - 1], lon_e6[i - 1]), p]
                 cur = c
-        self.add_piece(cur, cls, piece)
+        self.add_piece(cur, cls, flags, piece)
 
-    def write(self, path, built):
+    def write(self, path, built, version):
         header = bytearray(b"KRM1")
-        header += struct.pack("<HHiiHHII", VERSION, 0, self.lat0, self.lon0, self.nx, self.ny, CELL_E6, built)
+        header += struct.pack("<HHiiHHII", version, 0, self.lat0, self.lon0, self.nx, self.ny, CELL_E6, built)
         index_size = self.nx * self.ny * 8
         offset = len(header) + index_size
         index = bytearray()
@@ -178,7 +184,7 @@ class Region:
                     continue
                 blob = bytearray()
                 varint(entry[0], blob)
-                blob += entry[1]
+                blob += entry[1] if version == 1 else entry[2]
                 index += struct.pack("<II", offset, len(blob))
                 blobs.append(blob)
                 offset += len(blob)
@@ -214,6 +220,13 @@ class Handler(osmium.SimpleHandler):
             lon.append(n.location.lon)
         if len(lat) < 2:
             return
+        flags = 0
+        if w.tags.get("bridge", "no") not in ("no", "0"):
+            flags |= FLAG_BRIDGE
+        if w.tags.get("tunnel", "no") not in ("no", "0") or w.tags.get("covered") == "yes":
+            flags |= FLAG_TUNNEL
+        if w.tags.get("junction") in ("roundabout", "circular"):
+            flags |= FLAG_ROUNDABOUT
         keep = simplify(lat, lon, 4.0 if cls >= 3 else 2.5)
         la = [int(round(lat[i] * 1e6)) for i in keep]
         lo = [int(round(lon[i] * 1e6)) for i in keep]
@@ -221,7 +234,7 @@ class Handler(osmium.SimpleHandler):
         hit = False
         for r in self.regions:
             if r.intersects(s, w_, n_, e):
-                r.add_way(cls, la, lo)
+                r.add_way(cls, flags, la, lo)
                 hit = True
         if hit:
             self.kept += 1
@@ -234,8 +247,6 @@ def main():
         print(__doc__)
         sys.exit(1)
     src, out = sys.argv[1], sys.argv[2]
-    outdir = os.path.join(out, "v1")
-    os.makedirs(outdir, exist_ok=True)
 
     regions = [Region(*r) for r in REGIONS]
     t0 = time.time()
@@ -246,29 +257,33 @@ def main():
     print(f"Calles: {h.kept} usadas de {h.seen} con 'highway' ({time.time() - t0:.0f} s)")
 
     built = int(time.time())
-    index = {
-        "version": VERSION,
-        "built": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(built)),
-        "source": os.path.basename(src) + " (© OpenStreetMap contributors, ODbL)",
-        "regions": [],
-    }
-    for r in regions:
-        fname = f"{r.id}.krm"
-        path = os.path.join(outdir, fname)
-        r.write(path, built)
-        data = open(path, "rb").read()
-        index["regions"].append({
-            "id": r.id, "name": r.name,
-            "bbox": [round(v, 4) for v in r.bbox],
-            "file": fname, "size": len(data),
-            "sha256": hashlib.sha256(data).hexdigest(),
-            "ways": r.ways, "points": r.points,
-        })
-        print(f"  {r.name:<20} {len(data) / 1e6:6.2f} MB  {r.ways:>8} tramos  {r.points:>9} puntos")
-    with open(os.path.join(outdir, "regions.json"), "w", encoding="utf-8") as f:
-        json.dump(index, f, ensure_ascii=False, indent=1)
-    print(f"Listo en {time.time() - t0:.0f} s -> {outdir}")
+    for version in (1, 2):
+        outdir = os.path.join(out, f"v{version}")
+        os.makedirs(outdir, exist_ok=True)
+        index = {
+            "version": version,
+            "built": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(built)),
+            "source": os.path.basename(src) + " (© OpenStreetMap contributors, ODbL)",
+            "regions": [],
+        }
+        for r in regions:
+            fname = f"{r.id}.krm"
+            path = os.path.join(outdir, fname)
+            r.write(path, built, version)
+            data = open(path, "rb").read()
+            index["regions"].append({
+                "id": r.id, "name": r.name,
+                "bbox": [round(v, 4) for v in r.bbox],
+                "file": fname, "size": len(data),
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "ways": r.ways, "points": r.points,
+            })
+            print(f"  v{version} {r.name:<20} {len(data) / 1e6:6.2f} MB  {r.ways:>8} tramos  {r.points:>9} puntos")
+        with open(os.path.join(outdir, "regions.json"), "w", encoding="utf-8") as f:
+            json.dump(index, f, ensure_ascii=False, indent=1)
+    print(f"Listo en {time.time() - t0:.0f} s -> {out}")
 
 
 if __name__ == "__main__":
     main()
+
