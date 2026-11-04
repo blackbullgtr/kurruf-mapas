@@ -16,6 +16,7 @@ def read_krm(path):
     data = open(path, "rb").read()
     assert data[:4] == b"KRM1", "no es un .krm"
     ver, _, lat0, lon0, nx, ny, cell, built = struct.unpack_from("<HHiiHHII", data, 4)
+    assert ver in (1, 2), f"versión {ver} desconocida"
     index = struct.unpack_from("<" + "II" * nx * ny, data, 28)
     return data, (lat0, lon0, nx, ny, cell, built), index
 
@@ -45,7 +46,7 @@ def cell_ways(data, hdr, index, ix, iy):
     out = []
     clat, clon = lat0 + iy * cell, lon0 + ix * cell
     for _ in range(varint()):
-        cls = data[pos]
+        cls = data[pos] & 0x03       # v2: los bits altos son marcas (puente/túnel/rotonda)
         pos += 1
         n = varint()
         pts, la, lo = [], clat, clon
